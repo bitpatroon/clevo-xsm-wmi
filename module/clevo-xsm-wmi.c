@@ -148,6 +148,10 @@ static const struct kernel_param_ops param_ops_kb_brightness = {
 	.get = param_get_byte,
 };
 
+static unsigned int cached_led_brightness;
+static bool cached_led_brightness_valid;
+
+
 static unsigned char param_kb_brightness = KB_BRIGHTNESS_DEFAULT;
 #define param_check_kb_brightness param_check_byte
 module_param_named(kb_brightness, param_kb_brightness, kb_brightness, S_IRUSR);
@@ -632,6 +636,8 @@ static void kb_full_color__set_color(unsigned left, unsigned center,
 
 static void kb_full_color__set_brightness(unsigned i)
 {
+	pr_err("CLEVO SET_BRIGHTNESS: i=%u\n", i);
+
 	u8 lvl_to_raw[] = { 63, 126, 189, 252 };
 
 	i = clamp_t(unsigned, i, 0, ARRAY_SIZE(lvl_to_raw) - 1);
@@ -673,6 +679,9 @@ static void kb_full_color__set_mode(unsigned mode)
 
 static void kb_full_color__set_state(enum kb_state state)
 {
+	pr_err("CLEVO SET_STATE: state=%u, br=%u\n", state, kb_backlight.brightness);
+	pr_err("CLEVO SET_STATE FULL_COLOR\n");
+
 	u32 cmd = 0xE0000000;
 
 	CLEVO_XSM_DEBUG("State: %d\n", state);
@@ -755,6 +764,8 @@ static void kb_8_color__set_color(unsigned left, unsigned center,
 
 static void kb_8_color__set_brightness(unsigned i)
 {
+	pr_err("CLEVO SET_BRIGHTNESS: i=%u\n", i);
+
 	u32 cmd = 0xD2010000;
 
 	i = clamp_t(unsigned, i, 0, KB_BRIGHTNESS_MAX);
@@ -800,6 +811,9 @@ static void kb_8_color__set_mode(unsigned mode)
 
 static void kb_8_color__set_state(enum kb_state state)
 {
+	pr_err("CLEVO SET_STATE: state=%u, br=%u\n", state, kb_backlight.brightness);
+	pr_err("CLEVO SET_STATE 8_COLOR\n");
+
 	CLEVO_XSM_DEBUG("State: %d\n", state);
 
 	switch (state) {
@@ -848,64 +862,135 @@ static struct kb_backlight_ops kb_8_color_ops = {
 	.init           = kb_8_color__init,
 };
 
+// SZO: 14-12-2025
+static enum led_brightness clevo_kbd_get(struct led_classdev *cdev)
+{
+	if (param_kb_off)
+		return 0;
 
-static void clevo_xsm_wmi_notify(u32 value, void *context)
+	return param_kb_brightness;
+}
+
+// SZO: 14-12-2025
+static int clevo_kbd_set(struct led_classdev *cdev,
+						 enum led_brightness brightness)
+{
+	pr_err("CLEVO LED: ops=%ps\n", kb_backlight.ops);
+
+
+	if (!kb_backlight.ops)
+		return 0;
+
+	if (brightness > KB_BRIGHTNESS_MAX)
+		brightness = KB_BRIGHTNESS_MAX;
+
+	pr_err("CLEVO LED: kbd_set called, brightness=%u\n", brightness);
+
+	if (brightness == 0) {
+		param_kb_off = true;
+		param_kb_brightness = 0;
+
+		kb_backlight.brightness = 0;
+		kb_backlight.state = KB_STATE_OFF;
+		kb_backlight.ops->set_state(KB_STATE_OFF);
+		return 0;
+	}
+
+	param_kb_off = false;
+	param_kb_brightness = brightness;
+
+	kb_backlight.brightness = brightness;
+
+	/* 🔑 DIT is de magische Clevo-sequence */
+	kb_backlight.ops->set_state(KB_STATE_OFF);
+	kb_backlight.ops->set_brightness(brightness);
+	kb_backlight.ops->set_state(KB_STATE_ON);
+
+	return 0;
+}
+
+
+// SZO: 14-12-2025
+static struct led_classdev clevo_kbd_led = {
+	.name                    = "clevo::kbd_backlight",
+	.brightness_set_blocking = clevo_kbd_set,
+	.brightness_get          = clevo_kbd_get,
+	.max_brightness          = KB_BRIGHTNESS_MAX,
+};
+
+
+static void clevo_xsm_wmi_notify(union acpi_object *obj, void *context)
 {
 	static unsigned int report_cnt;
 
 	u32 event;
 
-	if (value != 0xD0) {
-		CLEVO_XSM_INFO("Unexpected WMI event (%0#6x)\n", value);
+	u32 value = 0;
+
+	if (!obj) {
 		return;
 	}
+
+	/*
+	 * Meestal komt de event-code als ACPI_TYPE_INTEGER binnen.
+	 * (Zie vergelijkbare fixes in andere WMI-modules.)
+	 */
+	if (obj->type == ACPI_TYPE_INTEGER) {
+		value = (u32)obj->integer.value;
+	} else {
+		/* Als jouw firmware iets anders stuurt, kun je dit loggen/debuggen */
+		return;
+	}
+
+	/* ---- hieronder jouw bestaande code die 'value' gebruikt ---- */
+	/* ... (laat de rest van de functie zoveel mogelijk hetzelfde) ... */
 
 	clevo_xsm_wmi_evaluate_wmbb_method(GET_EVENT, 0, &event);
 
 	switch (event) {
-	case 0xF4:
-		CLEVO_XSM_DEBUG("Airplane-Mode Hotkey pressed\n");
+		case 0xF4:
+			CLEVO_XSM_DEBUG("Airplane-Mode Hotkey pressed\n");
 
-		if (clevo_xsm_input_polling_task) {
-			CLEVO_XSM_INFO("Stopping polling thread\n");
-			kthread_stop(clevo_xsm_input_polling_task);
-			clevo_xsm_input_polling_task = NULL;
-		}
+			if (clevo_xsm_input_polling_task) {
+				CLEVO_XSM_INFO("Stopping polling thread\n");
+				kthread_stop(clevo_xsm_input_polling_task);
+				clevo_xsm_input_polling_task = NULL;
+			}
 
-		mutex_lock(&clevo_xsm_input_report_mutex);
+			mutex_lock(&clevo_xsm_input_report_mutex);
 
-		if (global_report_cnt > report_cnt) {
+			if (global_report_cnt > report_cnt) {
+				mutex_unlock(&clevo_xsm_input_report_mutex);
+				break;
+			}
+
+			clevo_xsm_input_report_key(KEY_RFKILL);
+			report_cnt++;
+
 			mutex_unlock(&clevo_xsm_input_report_mutex);
 			break;
-		}
+		default:
+			if (!kb_backlight.ops)
+				break;
 
-		clevo_xsm_input_report_key(KEY_RFKILL);
-		report_cnt++;
-
-		mutex_unlock(&clevo_xsm_input_report_mutex);
-		break;
-	default:
-		if (!kb_backlight.ops)
+			switch (event) {
+				case 0x81:
+					kb_dec_brightness();
+					break;
+				case 0x82:
+					kb_inc_brightness();
+					break;
+				case 0x83:
+					if (!param_kb_cycle_colors)
+						kb_next_mode();
+					else
+						kb_next_color();
+					break;
+				case 0x9F:
+					kb_toggle_state();
+					break;
+			}
 			break;
-
-		switch (event) {
-		case 0x81:
-			kb_dec_brightness();
-			break;
-		case 0x82:
-			kb_inc_brightness();
-			break;
-		case 0x83:
-			if (!param_kb_cycle_colors)
-				kb_next_mode();
-			else
-				kb_next_color();
-			break;
-		case 0x9F:
-			kb_toggle_state();
-			break;
-		}
-		break;
 	}
 }
 
@@ -926,13 +1011,37 @@ static int clevo_xsm_wmi_probe(struct platform_device *dev)
 	if (kb_backlight.ops)
 		kb_backlight.ops->init();
 
+	/* ✅ NU pas is de backlight-engine echt klaar */
+	if (kb_backlight.ops && cached_led_brightness_valid) {
+		pr_err("CLEVO INIT: applying cached brightness=%u\n",
+			   cached_led_brightness);
+
+		if (cached_led_brightness == 0) {
+			kb_backlight.ops->set_state(KB_STATE_OFF);
+		} else {
+			kb_backlight.ops->set_state(KB_STATE_ON);
+			kb_backlight.ops->set_brightness(cached_led_brightness);
+			kb_backlight.ops->set_state(KB_STATE_ON);
+		}
+		cached_led_brightness_valid = false;
+	}
+
+	// SZO: 14-12-2025
+	/* NIEUW: keyboard backlight LED registreren */
+	status = led_classdev_register(&dev->dev, &clevo_kbd_led);
+	if (status) {
+		wmi_remove_notify_handler(CLEVO_EVENT_GUID);
+		return status;
+	}
+
 	return 0;
 }
 
-static int clevo_xsm_wmi_remove(struct platform_device *dev)
+static void clevo_xsm_wmi_remove(struct platform_device *dev)
 {
+	led_classdev_unregister(&clevo_kbd_led);
 	wmi_remove_notify_handler(CLEVO_EVENT_GUID);
-	return 0;
+	return;
 }
 
 static int clevo_xsm_wmi_resume(struct platform_device *dev)
@@ -1332,8 +1441,7 @@ clevo_hwmon_init(struct device *dev)
 	return 0;
 }
 
-static int
-clevo_hwmon_fini(struct device *dev)
+static int clevo_hwmon_fini(struct device *dev)
 {
 	if (!clevo_hwmon || !clevo_hwmon->dev)
 		return 0;
