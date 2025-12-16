@@ -56,3 +56,8 @@ utility/clevo-xsm-wmi
 
 # Generated files
 utility/Makefile
+/.idea/.gitignore
+/.idea/clevo-xsm-wmi.iml
+/.idea/editor.xml
+/.idea/modules.xml
+/.idea/vcs.xml
