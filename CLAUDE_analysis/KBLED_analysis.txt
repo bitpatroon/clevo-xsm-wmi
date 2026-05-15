@@ -1,0 +1,167 @@
+═════════════════════════════════════════════════════════════════════════════
+                    KBLED.dll REVERSE ENGINEERING ANALYSIS
+                         Clevo X370SNx Keyboard LED
+═════════════════════════════════════════════════════════════════════════════
+
+1. CONFIRMED EC COMMAND PATTERNS
+────────────────────────────────────
+
+Type 0x03, cmd 0xC1 (RGB COLOR) → Found 3 times
+  Purpose: Set full RGB color per zone or globally
+  Structure: [0x03, 0x00, 0xC1, <byte1>, <byte2>, <byte3>, <byte4>, 0x00]
+  Bytes: Likely R,G,B + brightness/zone selector
+
+Type 0x03, cmd 0xC2 (ZONE COLOR) → Found 35 times (heavily used!)
+  Purpose: Set color per zone (left, mid, right, etc)
+  Structure: [0x03, 0x00, 0xC2, <color_byte1>, <color_byte2>, 0x00, 0x00, 0x00]
+  Bytes: Likely packed RGB or palette index
+
+Type 0x03, cmd 0xC4 (MODE/EFFECT) → Found 5 times
+  Purpose: Set lighting mode/effect
+  Structure: [0x03, 0x00, 0xC4, <mode>, ...]
+  Modes: Static, Wave, Breathe, Rainbow, Flash, etc.
+
+Type 0x02, cmd 0xC6 (BRIGHTNESS) → Found 5 times
+  Purpose: Set brightness level
+  Structure: [0x02, 0x00, 0xC6, <brightness_level>, ...]
+  Brightness: 0-100 or 0-255?
+
+Type 0x03, cmd 0xBA (RAW WRITE) → Found 31 times
+  Purpose: Direct register write (used for complex operations)
+  Structure: [0x03, 0x00, 0xBA, <addr>, <data>, ...]
+
+════════════════════════════════════════════════════════════════════════════
+
+2. CRITICAL WMI INTERFACE FUNCTIONS (Exported from KBLED.dll)
+────────────────────────────────────────────────────────────
+
+WMI Communication Layer:
+  • Init_WMI() → Initialize WMI interface
+  • SetWMI() → Set single WMI parameter
+  • SetWMIPackage() → Set WMI method package
+  • SetWMIPackageEx() → Extended WMI package setter
+  • GetWMI() → Get WMI parameter
+  • GetWMIPackage() → Get WMI method package
+  • GetWMIFlag() → Check WMI availability
+  • SendMsg_WMI() → Send WMI message
+  • GetMsg_WMI() → Receive WMI message
+  • RW_WMIPackage() → Read-Write WMI package
+
+RGB Control Functions:
+  ▸ SetRGBAllColor(R, G, B) → Set entire keyboard to one color
+  ▸ SetRGBLeftColor(R, G, B) → Left zone
+  ▸ SetRGBMidColor(R, G, B) → Middle zone
+  ▸ SetRGBRightColor(R, G, B) → Right zone
+  ▸ SetRGBLogoColor(R, G, B) → Logo LED
+  ▸ SetRGBLightBarColor(R, G, B) → Light bar (bottom)
+  
+  ▸ GetRGBAllColor() → Retrieve current color
+  ▸ GetRGBLeftColor() → etc.
+  
+Zone Control (Alternative API for per-zone):
+  ▸ SetZoneLeftColor(R, G, B)
+  ▸ SetZoneMidColor(R, G, B)
+  ▸ SetZoneRightColor(R, G, B)
+  ▸ SetZone4Color(R, G, B)
+  ▸ SetZone5Color(R, G, B)
+  ▸ SetZone6Color(R, G, B)
+
+Brightness Control:
+  ▸ SetBrightness(level) → Set global brightness
+  ▸ SetBrightnessLevel(level) → Alternative name
+  ▸ Set_Brightness(level)
+  ▸ Logo_Brightness(level) → Logo brightness
+  ▸ SetBrightnessUp() → Increment brightness
+  ▸ SetBrightnessDown() → Decrement brightness
+  ▸ GetBrightness() → Get current level
+  ▸ UpdateCurrentBrightness()
+
+Lighting Mode:
+  • UpdateToggleRGB() → Toggle RGB on/off
+  • SetLED_OFF() → Turn off keyboard
+  • LED_ON → Enable keyboard
+  • UpdateWhiteLEDStatus() → Toggle white mode
+
+Per-Key RGB (Advanced):
+  ▸ SetPerkeyBrightnessSpeed(speed, brightness)
+  ▸ Set_CustomRGB(per_key_data)
+
+WMI Method Queries:
+  ▸ Read_WMI13() → Query WMI method 0x13
+  ▸ Read_WMI17() → Query WMI method 0x17
+  ▸ Read_WMI4_sub35() → WMI method 0x04, sub-ID 35
+  ▸ Read_WMI4_sub60() → WMI method 0x04, sub-ID 60
+  ▸ Read_WMI4_sub3() → WMI method 0x04, sub-ID 3
+  ▸ GetDCHU_Data_Buffer() → Get DCHU buffer
+
+════════════════════════════════════════════════════════════════════════════
+
+3. MULTI-ZONE KEYBOARD LAYOUT
+──────────────────────────────
+
+The KBLED.dll recognizes these zones:
+  • ALL (entire keyboard)
+  • LEFT
+  • MID (Middle)
+  • RIGHT
+  • LOGO (Logo backlight)
+  • LIGHT_BAR (Bottom light bar for X170 model)
+  • Zone4, Zone5, Zone6 (Extended zones for some models)
+
+Animation Effects Detected:
+  • MultiZone_static → Solid color
+  • MultiZone_random → Random colors
+  • MultiZone_breathe / breathe2 → Breathing effect
+  • MultiZone_Cycle → Color cycling
+  • MultiZone_wave → Wave effect
+  • MultiZone_Dancing → Dance pattern
+  • MultiZone_Tempo → Tempo-based effect
+  • MultiZone_blink → Blinking
+
+════════════════════════════════════════════════════════════════════════════
+
+4. WIRING: HOW IT ALL CONNECTS
+───────────────────────────────
+
+Control Center 4.0 (CC40.exe)
+        ↓
+    KBLED.dll
+        ↓
+    SetRGBLeftColor(255,0,0)  [C# wrapper]
+        ↓
+    Init_WMI() + SetWMI/SetWMIPackage()
+        ↓
+    WMI calls to WMBB method (GUID: ABBC0F6D-8EA1-11D1-...)
+        ↓
+    AcpiBridge.sys
+        ↓
+    EC command: [0x03, 0x00, 0xC2, <RGB>, ...]
+        ↓
+    Embedded Controller (EC) / Firmware
+        ↓
+    RGB Zones Light Up!
+
+════════════════════════════════════════════════════════════════════════════
+
+5. LINUX IMPLEMENTATION STRATEGY
+─────────────────────────────────
+
+We don't need to call the Windows WMI interface.
+Instead, we need to:
+
+  1. Use the DSDT ACPI WMBB method definition we already extracted
+  2. Call acpi_evaluate_object() or wmi.evaluate_method() to invoke WMBB
+  3. Pass the correct buffer with:
+     - MethodId = 0x68 (for RGB color) or 0x67 (legacy) or 0x6A-0x6D
+     - InBuffer with the RGB values
+  4. The embedded EC controller handles the rest
+
+════════════════════════════════════════════════════════════════════════════
+
+NEXT STEPS:
+
+1. Extract exports from KBLED.dll to map exact function signatures
+2. Trace one specific function (e.g., SetRGBLeftColor) in debugger
+3. Confirm exact WMI MethodId and buffer format for red/green/blue
+4. Build Linux ACPI module that mirrors the functionality
+

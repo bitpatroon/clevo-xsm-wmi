@@ -60,6 +60,16 @@
 #define GET_AP                  0x46  /*  70 */
 #define SET_3G                  0x4C  /*  76 */
 #define SET_KB_LED              0x67  /* 103 */
+#define SET_KB_LED_RGB          0x68  /* 104 */
+#define SET_KB_LED_REFRESH      0x69  /* 105 */
+
+/* Insyde EC mailbox registers (DSDT EC81 OperationRegion, EmbeddedControl 0xF8-0xFD).
+ * Write data regs first, then FCMD last — that triggers EC firmware execution. */
+#define CLEVO_EC_FCMD  0xF8
+#define CLEVO_EC_FDAT  0xF9
+#define CLEVO_EC_FBUF  0xFA
+#define CLEVO_EC_FBF1  0xFB
+#define CLEVO_EC_FBF2  0xFC
 #define AIRPLANE_BUTTON         0x6D  /* 109 */    /* or 0x6C (?) */
 #define TALK_BIOS_3G            0x78  /* 120 */
 
@@ -596,29 +606,33 @@ static void kb_full_color__set_color(unsigned left, unsigned center,
 	unsigned right, unsigned extra)
 {
 	u32 cmd;
+	int ret;
 
 	cmd = 0xF0000000;
-	cmd |= kb_colors[left].value.b << 16;
-	cmd |= kb_colors[left].value.r <<  8;
-	cmd |= kb_colors[left].value.g <<  0;
+	cmd |= kb_colors[left].value.r << 16;
+	cmd |= kb_colors[left].value.g <<  8;
+	cmd |= kb_colors[left].value.b <<  0;
 
-	if (!clevo_xsm_wmi_evaluate_wmbb_method(SET_KB_LED, cmd, NULL))
+	ret = clevo_xsm_wmi_evaluate_wmbb_method(SET_KB_LED, cmd, NULL);
+	if (!ret)
 		kb_backlight.color.left = left;
 
 	cmd = 0xF1000000;
-	cmd |= kb_colors[center].value.b << 16;
-	cmd |= kb_colors[center].value.r <<  8;
-	cmd |= kb_colors[center].value.g <<  0;
+	cmd |= kb_colors[center].value.r << 16;
+	cmd |= kb_colors[center].value.g <<  8;
+	cmd |= kb_colors[center].value.b <<  0;
 
-	if (!clevo_xsm_wmi_evaluate_wmbb_method(SET_KB_LED, cmd, NULL))
+	ret = clevo_xsm_wmi_evaluate_wmbb_method(SET_KB_LED, cmd, NULL);
+	if (!ret)
 		kb_backlight.color.center = center;
 
 	cmd = 0xF2000000;
-	cmd |= kb_colors[right].value.b << 16;
-	cmd |= kb_colors[right].value.r <<  8;
-	cmd |= kb_colors[right].value.g <<  0;
+	cmd |= kb_colors[right].value.r << 16;
+	cmd |= kb_colors[right].value.g <<  8;
+	cmd |= kb_colors[right].value.b <<  0;
 
-	if (!clevo_xsm_wmi_evaluate_wmbb_method(SET_KB_LED, cmd, NULL))
+	ret = clevo_xsm_wmi_evaluate_wmbb_method(SET_KB_LED, cmd, NULL);
+	if (!ret)
 		kb_backlight.color.right = right;
 
 	if (kb_backlight.extra == KB_HAS_EXTRA_TRUE) {
@@ -636,8 +650,6 @@ static void kb_full_color__set_color(unsigned left, unsigned center,
 
 static void kb_full_color__set_brightness(unsigned i)
 {
-	pr_err("CLEVO SET_BRIGHTNESS: i=%u\n", i);
-
 	u8 lvl_to_raw[] = { 63, 126, 189, 252 };
 
 	i = clamp_t(unsigned, i, 0, ARRAY_SIZE(lvl_to_raw) - 1);
@@ -679,9 +691,6 @@ static void kb_full_color__set_mode(unsigned mode)
 
 static void kb_full_color__set_state(enum kb_state state)
 {
-	pr_err("CLEVO SET_STATE: state=%u, br=%u\n", state, kb_backlight.brightness);
-	pr_err("CLEVO SET_STATE FULL_COLOR\n");
-
 	u32 cmd = 0xE0000000;
 
 	CLEVO_XSM_DEBUG("State: %d\n", state);
@@ -739,6 +748,140 @@ static struct kb_backlight_ops kb_full_color_with_extra_ops = {
 	.set_brightness = kb_full_color__set_brightness,
 	.set_mode       = kb_full_color__set_mode,
 	.init           = kb_full_color__init_extra,
+};
+
+/* X370SNx: call \_SB.PC00.LPCB.EC.ECMD directly via ACPI.
+ *
+ * ECOK=0 blocks the WMI→SCMD path, but ECMD itself doesn't check ECOK.
+ * Calling ECMD via acpi_evaluate_object() goes through the ACPI EC
+ * OperationRegion handler (burst mode, proper locking) which differs from
+ * raw ec_write() and is the same path Windows uses internally.
+ *
+ * ECMD buffer layout (from DSDT):
+ *   [0]=param_count [1]=flags [2]=FCMD [3]=FDAT [4]=FBUF [5]=FBF1 [6]=FBF2
+ * FCMD is written last by the method to trigger EC execution.
+ *
+ * Zone IDs for EC cmd 0xCA: LEFT=3, CENTER=4, RIGHT=5 (DSDT 0x67/sub-0x0F)
+ */
+
+static acpi_status x370_acpi_ecmd(u8 param_count, u8 cmd,
+				   u8 dat, u8 buf, u8 bf1, u8 bf2)
+{
+	u8 raw[8] = { param_count, 0, cmd, dat, buf, bf1, bf2, 0 };
+	union acpi_object arg;
+	struct acpi_object_list input;
+
+	memset(&arg, 0, sizeof(arg));
+	arg.type           = ACPI_TYPE_BUFFER;
+	arg.buffer.length  = sizeof(raw);
+	arg.buffer.pointer = raw;
+
+	input.count   = 1;
+	input.pointer = &arg;
+
+	return acpi_evaluate_object(NULL,
+		"\\_SB.PC00.LPCB.EC.ECMD", &input, NULL);
+}
+
+static void x370_ec_set_zone_rgb(u8 zone_id, u8 r, u8 g, u8 b)
+{
+	acpi_status st = x370_acpi_ecmd(5, 0xCA, zone_id, r, g, b);
+
+	pr_info("X370 ECMD 0xCA zone=%u R=%u G=%u B=%u st=0x%x\n",
+		zone_id, r, g, b, st);
+}
+
+static void kb_x370__set_color(unsigned left, unsigned center,
+	unsigned right, unsigned extra)
+{
+	acpi_status st;
+
+	pr_info("X370 set_color: left=%u center=%u right=%u\n",
+		left, center, right);
+
+	/* Custom/static mode: ECMD(3, 0xC4, FDAT=0x03, FBUF=0x00) */
+	st = x370_acpi_ecmd(3, 0xC4, 0x03, 0x00, 0, 0);
+	pr_info("X370 ECMD 0xC4 mode-set st=0x%x\n", st);
+
+	x370_ec_set_zone_rgb(3,
+		kb_colors[left].value.r, kb_colors[left].value.g,
+		kb_colors[left].value.b);
+	x370_ec_set_zone_rgb(4,
+		kb_colors[center].value.r, kb_colors[center].value.g,
+		kb_colors[center].value.b);
+	x370_ec_set_zone_rgb(5,
+		kb_colors[right].value.r, kb_colors[right].value.g,
+		kb_colors[right].value.b);
+
+	kb_backlight.color.left   = left;
+	kb_backlight.color.center = center;
+	kb_backlight.color.right  = right;
+	kb_backlight.mode = KB_MODE_CUSTOM;
+}
+
+static void kb_x370__set_state(enum kb_state state)
+{
+	/* ECMD(3, 0xC4, FDAT=0x0C, FBUF=0x3F/0x20) — DSDT 0x67/sub-0x0E */
+	u8 val = (state == KB_STATE_ON) ? 0x3F : 0x20;
+	acpi_status st = x370_acpi_ecmd(3, 0xC4, 0x0C, val, 0, 0);
+
+	pr_info("X370 set_state: state=%d val=0x%02x st=0x%x\n",
+		state, val, st);
+	kb_backlight.state = state;
+}
+
+static void kb_x370__set_brightness(unsigned i)
+{
+	/* ECMD(5, 0xCA, zone_id=6, raw, 0, raw) — DSDT 0x67/sub-0x0F/Local4==4 */
+	static const u8 lvl_to_raw[] = { 63, 126, 189, 252 };
+	u8 raw;
+
+	i = clamp_t(unsigned, i, 0, ARRAY_SIZE(lvl_to_raw) - 1);
+	raw = lvl_to_raw[i];
+	x370_acpi_ecmd(5, 0xCA, 6, raw, 0, raw);
+	kb_backlight.brightness = i;
+}
+
+static void kb_x370__init(void)
+{
+	u8 ec_e8 = 0;
+	void __iomem *psf0_va;
+	u32 psf0_val = 0;
+
+	CLEVO_XSM_DEBUG();
+
+	/* FLSH = EC[0xE8] bit 4. ECMD silently no-ops if FLSH != 0. */
+	if (ec_read(0xE8, &ec_e8) == 0)
+		pr_info("X370 EC[0xE8]=0x%02x FLSH(bit4)=%d\n",
+			ec_e8, (ec_e8 >> 4) & 1);
+	else
+		pr_warn("X370 ec_read(0xE8) failed\n");
+
+	/* PSF0 at SystemMemory 0x33857018: bit 0 gates ECOK (_REG). */
+	psf0_va = ioremap(0x33857018UL, 4);
+	if (psf0_va) {
+		psf0_val = ioread32(psf0_va);
+		pr_info("X370 PSF0=0x%08x ECOK-gate(bit0)=%d\n",
+			psf0_val, psf0_val & 1);
+		iounmap(psf0_va);
+	} else {
+		pr_warn("X370 ioremap PSF0 failed\n");
+	}
+
+	kb_backlight.extra = KB_HAS_EXTRA_FALSE;
+
+	kb_x370__set_state(param_kb_off ? KB_STATE_OFF : KB_STATE_ON);
+	kb_x370__set_color(param_kb_color[0], param_kb_color[1],
+		param_kb_color[2], param_kb_color[3]);
+	kb_x370__set_brightness(param_kb_brightness);
+}
+
+static struct kb_backlight_ops kb_x370_ops = {
+	.set_state      = kb_x370__set_state,
+	.set_color      = kb_x370__set_color,
+	.set_brightness = kb_x370__set_brightness,
+	.set_mode       = kb_full_color__set_mode,
+	.init           = kb_x370__init,
 };
 
 /* 8 color backlight keyboard */
@@ -1287,6 +1430,8 @@ static ssize_t clevo_xsm_color_store(struct device *child,
 		return -EINVAL;
 
 	kb_backlight.ops->set_color(val[0], val[1], val[2], val[3]);
+	if (kb_backlight.state == KB_STATE_ON)
+		kb_backlight.ops->set_state(KB_STATE_ON);
 
 	return size;
 }
@@ -1614,6 +1759,14 @@ static struct dmi_system_id clevo_xsm_dmi_table[] __initdata = {
 		},
 		.callback = clevo_xsm_dmi_matched,
 		.driver_data = &kb_full_color_with_extra_ops,
+	},
+	{
+		.ident = "Clevo X370SNx",
+		.matches = {
+			DMI_MATCH(DMI_PRODUCT_NAME, "X370SNx"),
+		},
+		.callback = clevo_xsm_dmi_matched,
+		.driver_data = &kb_x370_ops,
 	},
 	/* Ones that don't follow the 'standard' product names above */
 	{
