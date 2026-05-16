@@ -3,11 +3,12 @@
 Clevo X370SNx keyboard backlight — ITE 048d:8910 via USB HID.
 
 Usage:
-  clevo_backlight.py solid <R> <G> <B>           # alle toetsen één kleur (0-255)
-  clevo_backlight.py color <naam>                 # voorgedefinieerde kleur
-  clevo_backlight.py off                          # backlight uit
-  clevo_backlight.py brightness <0-255>           # helderheid (schaalt de RGB-waarden)
-  clevo_backlight.py key <naam|idx> <R> <G> <B>  # één toets op kleur
+  clevo_backlight.py solid <R> <G> <B>              # alle toetsen één kleur (0-255)
+  clevo_backlight.py color <naam>                   # voorgedefinieerde kleur
+  clevo_backlight.py off                            # backlight uit
+  clevo_backlight.py brightness <0-255>             # helderheid (schaalt de RGB-waarden)
+  clevo_backlight.py key <naam|idx> <R> <G> <B>    # één toets op kleur
+  clevo_backlight.py zone <zone> <naam|R> [G B]    # zone op kleur (left/middle/right)
 
 Optie:
   --dev /dev/hidrawN   HID device (default: /dev/hidraw4)
@@ -15,7 +16,7 @@ Optie:
 Geldige kleurnamen: red, green, blue, white, yellow, cyan, magenta, orange, purple
 
 State wordt opgeslagen in clevo_backlight.json naast dit script.
-Key-namen staan in mapping.json (zie README-keymappings.md).
+Key-namen staan in mapping.json, zones in zones.json (zie README-keymappings.md).
 Het commit-byte van de ITE-chip werkt alleen als aan/uit-schakelaar (0=uit, 0xFF=aan).
 Dimmen werkt door de RGB-waarden te schalen met het brightness-niveau.
 """
@@ -25,6 +26,7 @@ HIDRAW_DEFAULT = '/dev/hidraw4'
 SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE     = os.path.join(SCRIPT_DIR, 'clevo_backlight.json')
 MAPPING_FILE   = os.path.join(SCRIPT_DIR, 'mapping.json')
+ZONES_FILE     = os.path.join(SCRIPT_DIR, 'zones.json')
 NUM_KEYS       = 192   # indices 0-191 dekken alle fysieke toetsen
 
 COLORS = {
@@ -44,6 +46,7 @@ DEFAULT_STATE = {
     'brightness':    255,
     'default_color': [0, 0, 255],
     'keys':          {},
+    'zones':         {},
 }
 
 # --- HID -----------------------------------------------------------------
@@ -96,6 +99,17 @@ def load_mapping():
         return {}
     except Exception as e:
         print(f"Waarschuwing: kan mapping.json niet lezen: {e}", file=sys.stderr)
+        return {}
+
+def load_zones():
+    try:
+        with open(ZONES_FILE) as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if not k.startswith('_')}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"Waarschuwing: kan zones.json niet lezen: {e}", file=sys.stderr)
         return {}
 
 def resolve_key(key_arg, mapping):
@@ -188,6 +202,37 @@ def main():
             commit(fd)
             state = load_state()
             state['keys'][key_name] = [r, g, b]
+            save_state(state)
+
+        elif cmd == 'zone':
+            # zone <naam> <color|R> [G B]
+            if len(args) not in (3, 5):
+                print("Gebruik: zone <zone> <kleurnaam>  of  zone <zone> <R> <G> <B>")
+                sys.exit(1)
+            zone_name = args[1].lower()
+            zones = load_zones()
+            if not zones:
+                print("Fout: zones.json niet gevonden.")
+                sys.exit(1)
+            if zone_name not in zones:
+                print(f"Fout: zone '{zone_name}' niet gevonden. Beschikbaar: {', '.join(zones)}")
+                sys.exit(1)
+            if len(args) == 3:
+                color_arg = args[2]
+                if color_arg not in COLORS:
+                    print(f"Onbekende kleur. Kies uit: {', '.join(COLORS)}")
+                    sys.exit(1)
+                r, g, b = COLORS[color_arg]
+            else:
+                r, g, b = int(args[2]), int(args[3]), int(args[4])
+            mapping = load_mapping()
+            for key_name in zones[zone_name]:
+                _, indices = resolve_key(key_name, mapping)
+                for idx in indices:
+                    set_key(fd, idx, r, g, b)
+            commit(fd)
+            state = load_state()
+            state['zones'][zone_name] = [r, g, b]
             save_state(state)
 
         else:

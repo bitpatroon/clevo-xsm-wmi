@@ -7,7 +7,7 @@ Key-namen worden opgeslagen in `mapping.json`. Dit bestand koppelt elke naam aan
 | Type | Notatie | Voorbeelden |
 |---|---|---|
 | Letters | hoofdletter | `A`, `Z`, `Q` |
-| Cijfers (hoofdrij) | cijfer als string | `1`, `0`, `5` |
+| Cijfers (hoofdrij) | `N` + cijfer | `N1`, `N0`, `N5` |
 | Functietoetsen | `F` + nummer | `F1`, `F12` |
 | Speciale toetsen | afkorting hoofdletters | `ESC`, `TAB`, `CAPS`, `ENTER`, `BACKSPACE`, `SPACE` |
 | Modificateurs | hoofdletters | `LSHIFT`, `RSHIFT`, `LCTRL`, `RCTRL`, `ALT`, `ALTGR`, `FN`, `WIN`, `MENU` |
