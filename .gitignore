@@ -54,6 +54,9 @@ dkms.conf
 # Binaries
 utility/clevo-xsm-wmi
 
+# Runtime state
+clevo_backlight_color
+
 # Generated files
 utility/Makefile
 /.idea/.gitignore
