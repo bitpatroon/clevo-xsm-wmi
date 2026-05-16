@@ -3,25 +3,29 @@
 Clevo X370SNx keyboard backlight — ITE 048d:8910 via USB HID.
 
 Usage:
-  clevo_backlight.py solid <R> <G> <B>        # alle toetsen één kleur (0-255)
-  clevo_backlight.py color <naam>              # voorgedefinieerde kleur
-  clevo_backlight.py off                       # backlight uit
-  clevo_backlight.py brightness <0-255>        # helderheid (schaalt de RGB-waarden)
+  clevo_backlight.py solid <R> <G> <B>           # alle toetsen één kleur (0-255)
+  clevo_backlight.py color <naam>                 # voorgedefinieerde kleur
+  clevo_backlight.py off                          # backlight uit
+  clevo_backlight.py brightness <0-255>           # helderheid (schaalt de RGB-waarden)
+  clevo_backlight.py key <naam|idx> <R> <G> <B>  # één toets op kleur
 
 Optie:
   --dev /dev/hidrawN   HID device (default: /dev/hidraw4)
 
 Geldige kleurnamen: red, green, blue, white, yellow, cyan, magenta, orange, purple
 
-Instellingen worden opgeslagen in clevo_backlight.json naast dit script.
+State wordt opgeslagen in clevo_backlight.json naast dit script.
+Key-namen staan in mapping.json (zie README-keymappings.md).
 Het commit-byte van de ITE-chip werkt alleen als aan/uit-schakelaar (0=uit, 0xFF=aan).
 Dimmen werkt door de RGB-waarden te schalen met het brightness-niveau.
 """
 import fcntl, sys, os, json
 
 HIDRAW_DEFAULT = '/dev/hidraw4'
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clevo_backlight.json')
-NUM_KEYS = 192   # indices 0-191 dekken alle fysieke toetsen
+SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE     = os.path.join(SCRIPT_DIR, 'clevo_backlight.json')
+MAPPING_FILE   = os.path.join(SCRIPT_DIR, 'mapping.json')
+NUM_KEYS       = 192   # indices 0-191 dekken alle fysieke toetsen
 
 COLORS = {
     'red':     (255,   0,   0),
@@ -36,10 +40,13 @@ COLORS = {
 }
 
 DEFAULT_STATE = {
-    'color': [0, 0, 255],
-    'brightness': 255,
+    'color':         [0, 0, 255],
+    'brightness':    255,
     'default_color': [0, 0, 255],
+    'keys':          {},
 }
+
+# --- HID -----------------------------------------------------------------
 
 def HIDIOCSFEATURE(n):
     return (3 << 30) | (n << 16) | (ord('H') << 8) | 6
@@ -58,6 +65,8 @@ def set_all(fd, r, g, b, on=True):
         set_key(fd, i, r, g, b)
     commit(fd, on)
 
+# --- State ---------------------------------------------------------------
+
 def load_state():
     try:
         with open(STATE_FILE) as f:
@@ -75,6 +84,40 @@ def save_state(state):
             f.write('\n')
     except OSError as e:
         print(f"Waarschuwing: kan state niet opslaan: {e}", file=sys.stderr)
+
+# --- Mapping -------------------------------------------------------------
+
+def load_mapping():
+    try:
+        with open(MAPPING_FILE) as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if not k.startswith('_')}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"Waarschuwing: kan mapping.json niet lezen: {e}", file=sys.stderr)
+        return {}
+
+def resolve_key(key_arg, mapping):
+    """Geeft (key_name, [indices]) terug, of stopt met een foutmelding."""
+    if key_arg.isdigit():
+        idx = int(key_arg)
+        if not 0 <= idx <= 191:
+            print(f"Fout: index {idx} buiten bereik (0-191).")
+            sys.exit(1)
+        return key_arg, [idx]
+
+    name = key_arg.upper()
+    if not mapping:
+        print("Fout: mapping.json niet gevonden. Gebruik een numerieke index (0-191).")
+        sys.exit(1)
+    if name not in mapping:
+        print(f"Fout: '{name}' niet gevonden in mapping.json.")
+        print(f"Bekende namen: {', '.join(sorted(mapping))}")
+        sys.exit(1)
+    return name, mapping[name]
+
+# --- Main ----------------------------------------------------------------
 
 def main():
     args = sys.argv[1:]
@@ -132,6 +175,20 @@ def main():
             r, g, b = state['color']
             factor = level / 255.0
             set_all(fd, int(r * factor), int(g * factor), int(b * factor))
+
+        elif cmd == 'key':
+            if len(args) != 5:
+                print("Gebruik: key <naam|idx> <R> <G> <B>")
+                sys.exit(1)
+            mapping = load_mapping()
+            key_name, indices = resolve_key(args[1], mapping)
+            r, g, b = int(args[2]), int(args[3]), int(args[4])
+            for idx in indices:
+                set_key(fd, idx, r, g, b)
+            commit(fd)
+            state = load_state()
+            state['keys'][key_name] = [r, g, b]
+            save_state(state)
 
         else:
             print(f"Onbekend commando: {cmd}")
