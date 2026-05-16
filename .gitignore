@@ -55,7 +55,7 @@ dkms.conf
 utility/clevo-xsm-wmi
 
 # Runtime state
-clevo_backlight_color
+clevo_backlight.json
 
 # Generated files
 utility/Makefile

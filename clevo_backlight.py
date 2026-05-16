@@ -13,14 +13,14 @@ Optie:
 
 Geldige kleurnamen: red, green, blue, white, yellow, cyan, magenta, orange, purple
 
-Opmerking: het commit-byte van de ITE-chip werkt alleen als aan/uit-schakelaar (0=uit,
-0xFF=aan). Dimmen werkt door de RGB-waarden te schalen. De laatste kleur wordt opgeslagen
-in /tmp/clevo_backlight_color zodat 'brightness' die kan lezen.
+Instellingen worden opgeslagen in clevo_backlight.json naast dit script.
+Het commit-byte van de ITE-chip werkt alleen als aan/uit-schakelaar (0=uit, 0xFF=aan).
+Dimmen werkt door de RGB-waarden te schalen met het brightness-niveau.
 """
-import fcntl, sys, os
+import fcntl, sys, os, json
 
 HIDRAW_DEFAULT = '/dev/hidraw4'
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clevo_backlight_color')
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clevo_backlight.json')
 NUM_KEYS = 192   # indices 0-191 dekken alle fysieke toetsen
 
 COLORS = {
@@ -33,7 +33,12 @@ COLORS = {
     'magenta': (255,   0, 255),
     'orange':  (255, 165,   0),
     'purple':  (128,   0, 255),
-    'off':     (  0,   0,   0),
+}
+
+DEFAULT_STATE = {
+    'color': [0, 0, 255],
+    'brightness': 255,
+    'default_color': [0, 0, 255],
 }
 
 def HIDIOCSFEATURE(n):
@@ -53,20 +58,23 @@ def set_all(fd, r, g, b, on=True):
         set_key(fd, i, r, g, b)
     commit(fd, on)
 
-def save_color(r, g, b):
-    try:
-        with open(STATE_FILE, 'w') as f:
-            f.write(f'{r} {g} {b}\n')
-    except OSError:
-        pass
-
-def load_color():
+def load_state():
     try:
         with open(STATE_FILE) as f:
-            r, g, b = map(int, f.read().split())
-            return r, g, b
+            state = json.load(f)
+        for key, val in DEFAULT_STATE.items():
+            state.setdefault(key, val)
+        return state
     except Exception:
-        return None
+        return dict(DEFAULT_STATE)
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+            f.write('\n')
+    except OSError as e:
+        print(f"Waarschuwing: kan state niet opslaan: {e}", file=sys.stderr)
 
 def main():
     args = sys.argv[1:]
@@ -95,7 +103,9 @@ def main():
                 print("Gebruik: solid <R> <G> <B>")
                 sys.exit(1)
             r, g, b = int(args[1]), int(args[2]), int(args[3])
-            save_color(r, g, b)
+            state = load_state()
+            state['color'] = [r, g, b]
+            save_state(state)
             set_all(fd, r, g, b)
 
         elif cmd == 'color':
@@ -103,7 +113,9 @@ def main():
                 print(f"Onbekende kleur. Kies uit: {', '.join(COLORS)}")
                 sys.exit(1)
             r, g, b = COLORS[args[1]]
-            save_color(r, g, b)
+            state = load_state()
+            state['color'] = [r, g, b]
+            save_state(state)
             set_all(fd, r, g, b)
 
         elif cmd == 'off':
@@ -114,14 +126,12 @@ def main():
                 print("Gebruik: brightness <0-255>")
                 sys.exit(1)
             level = int(args[1])
-            state = load_color()
-            if state is None:
-                print("Fout: geen kleur opgeslagen. Stel eerst een kleur in met 'solid' of 'color'.",
-                      file=sys.stderr)
-                sys.exit(1)
+            state = load_state()
+            state['brightness'] = level
+            save_state(state)
+            r, g, b = state['color']
             factor = level / 255.0
-            r, g, b = (int(c * factor) for c in state)
-            set_all(fd, r, g, b)
+            set_all(fd, int(r * factor), int(g * factor), int(b * factor))
 
         else:
             print(f"Onbekend commando: {cmd}")
